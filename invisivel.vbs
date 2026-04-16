@@ -1,0 +1,1 @@
+CreateObject("WScript.Shell").Run "rodar.bat", 0, False
