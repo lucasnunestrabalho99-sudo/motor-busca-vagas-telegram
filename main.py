@@ -8,17 +8,20 @@ from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from bs4 import BeautifulSoup
 
-load_dotenv()
+# --- CONFIGURAÇÕES ---
+DIRETORIO_ATUAL = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(DIRETORIO_ATUAL, '.env'))
+CAMINHO_BANCO = os.path.join(DIRETORIO_ATUAL, 'vagas.db')
 
-# --- 1. A SUPER LISTA UNIFICADA DE PALAVRAS-CHAVE ---
+# LÊ AS SENHAS APENAS 1 VEZ AO INICIAR
+TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID_GRUPO")
+
 PALAVRAS_CHAVE = [
-    # Lucas (Dados/Gestão)
     "analista de dados", "business intelligence", "bi", "dados", "data", "pricing", 
     "comercial", "supervisão", "supervisor", "gerência", "gerente", "coordenação", 
     "coordenador", "economista", "inteligência de mercado", "inteligência de dados",
     "power bi", "python", "etl", "sql", "analista administrativo", "analista comercial",
-    
-    # Chico & Mariane (Vendas/Atendimento/Administrativo)
     "vendedor", "vendedora", "vendas", "sdr", "bdr", "assistente comercial", 
     "comercial interno", "consultor comercial", "representante comercial",
     "executivo de vendas", "inside sales", "closer", "atendimento ao cliente", 
@@ -28,130 +31,94 @@ PALAVRAS_CHAVE = [
 ]
 
 def vaga_nos_interessa(titulo):
-    titulo_lower = titulo.lower()
-    # Verifica se alguma palavra da nossa lista está no título da vaga
-    return any(palavra in titulo_lower for palavra in PALAVRAS_CHAVE)
+    return any(palavra in titulo.lower() for palavra in PALAVRAS_CHAVE)
 
-# --- 2. BANCO DE DADOS ---
 def iniciar_banco():
-    conn = sqlite3.connect('vagas.db')
+    conn = sqlite3.connect(CAMINHO_BANCO)
     cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS vagas_enviadas (
-            link TEXT,
-            data_publicacao TEXT,
-            titulo TEXT,
-            data_descoberta DATETIME DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (link, data_publicacao)
-        )
-    ''')
+    cursor.execute('CREATE TABLE IF NOT EXISTS vagas_enviadas (link TEXT, data_publicacao TEXT, titulo TEXT, PRIMARY KEY (link, data_publicacao))')
     conn.commit()
     return conn, cursor
 
-def ja_existe_no_banco(cursor, link, data_publicacao):
-    cursor.execute('SELECT 1 FROM vagas_enviadas WHERE link = ? AND data_publicacao = ?', (link, data_publicacao))
-    return cursor.fetchone() is not None
-
-def salvar_no_banco(conn, cursor, link, data_publicacao, titulo):
-    cursor.execute('INSERT INTO vagas_enviadas (link, data_publicacao, titulo) VALUES (?, ?, ?)', (link, data_publicacao, titulo))
-    conn.commit()
-
-# --- 3. DISPARO PARA O TELEGRAM ---
 def enviar_alerta_telegram(titulo, link, data, tags_texto):
-    token = os.getenv("TELEGRAM_TOKEN")
-    chat_id = os.getenv("CHAT_ID_GRUPO") 
+    if not TOKEN or not CHAT_ID:
+        print("ERRO: Credenciais ausentes no .env!")
+        return False
 
-    mensagem = f"🚨 *NOVA VAGA ENCONTRADA!*\n\n" \
-               f"💼 *Vaga:* {titulo}\n" \
-               f"🏷️ *Tags:* {tags_texto}\n" \
-               f"📅 *Publicação:* {data}\n\n" \
-               f"🔗 [Clique aqui para acessar]({link})"
-
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": mensagem,
-        "parse_mode": "Markdown",
-        "disable_web_page_preview": True
-    }
+    mensagem = f"🚨 *NOVA VAGA ENCONTRADA!*\n\n💼 *Vaga:* {titulo}\n🏷️ *Tags:* {tags_texto}\n📅 *Publicação:* {data}\n\n🔗 [Clique aqui para acessar]({link})"
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    payload = {"chat_id": CHAT_ID, "text": mensagem, "parse_mode": "Markdown", "disable_web_page_preview": True}
+    
     try:
-        requests.post(url, json=payload)
-    except Exception as e:
-        print(f"Erro no envio do Telegram: {e}")
+        r = requests.post(url, json=payload, timeout=10)
+        if r.status_code == 429:
+            pausa = r.json().get('parameters', {}).get('retry_after', 30)
+            print(f"Pausa anti-spam de {pausa}s...")
+            time.sleep(pausa)
+            requests.post(url, json=payload)
+            return True
+        elif r.status_code == 200:
+            print(f"✅ Alerta enviado: {titulo[:30]}...")
+            return True
+    except:
+        print("❌ Falha na conexão com o Telegram.")
+        return False
 
-# --- 4. MOTOR DE BUSCA ---
 def buscar_vagas_refinadas():
+    print("Iniciando varredura...")
     conn, cursor = iniciar_banco()
     
     opcoes = Options()
     opcoes.add_argument('--headless')
     opcoes.add_argument('--disable-gpu')
     opcoes.add_argument('--log-level=3')
-    opcoes.add_argument('user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
     
     driver = webdriver.Chrome(options=opcoes)
+    driver.set_page_load_timeout(30) # Reduzido para não agarrar o código por minutos
     
     pagina_atual = 1
-    vagas_velhas_seguidas = 0
-    LIMITE_VELHAS = 10
+    vagas_velhas = 0
 
-    while vagas_velhas_seguidas < LIMITE_VELHAS:
-        url = f"https://riovagas.com.br/category/riovagas/page/{pagina_atual}/"
-        
+    while vagas_velhas < 20 and pagina_atual <= 500:
+        print(f"Página {pagina_atual}...")
         try:
-            driver.get(url)
-            time.sleep(random.uniform(4.5, 7.5))
-        except:
-            time.sleep(10)
-            continue
-        
-        soup = BeautifulSoup(driver.page_source, 'html.parser')
-        artigos = soup.find_all('article')
-        
-        if not artigos:
-            break
-
-        for artigo in artigos:
-            h2 = artigo.find('h2', class_='entry-title')
-            if not h2: continue
+            driver.get(f"https://riovagas.com.br/category/riovagas/page/{pagina_atual}/")
+            time.sleep(random.uniform(3, 5))
+            soup = BeautifulSoup(driver.page_source, 'html.parser')
+            artigos = soup.find_all('article')
             
-            tag_a = h2.find('a')
-            if not tag_a: continue
-                
-            titulo = tag_a.text.strip()
-            link = tag_a.get('href')
+            if not artigos: break
 
-            # Extraindo a Data
-            tag_time = artigo.find('time')
-            data_publicacao = tag_time.text.strip() if tag_time else "Data Desconhecida"
+            for artigo in artigos:
+                h2 = artigo.find('h2', class_='entry-title')
+                if not h2 or not h2.find('a'): continue
+                    
+                titulo = h2.find('a').text.strip()
+                link = h2.find('a').get('href')
+                data = artigo.find('time').text.strip() if artigo.find('time') else "S/D"
+                tags = ", ".join([t.text.strip() for t in artigo.find_all('a', rel='tag')])
 
-            elementos_tags = artigo.find_all('a', rel='tag')
-            if elementos_tags:
-                tags_texto = ", ".join([t.text.strip() for t in elementos_tags])
-            else:
-                tags_texto = "Não informadas"
-
-            if ja_existe_no_banco(cursor, link, data_publicacao):
-                vagas_velhas_seguidas += 1
-                if vagas_velhas_seguidas >= LIMITE_VELHAS:
-                    break 
-            else:
-                vagas_velhas_seguidas = 0 
-                salvar_no_banco(conn, cursor, link, data_publicacao, titulo)
-                
-                # Se a vaga tem uma de nossas palavras-chave, enviamos o alerta
-                if vaga_nos_interessa(titulo):
-                    enviar_alerta_telegram(titulo, link, data_publicacao, tags_texto)
-        
-        if vagas_velhas_seguidas >= LIMITE_VELHAS:
-            break
+                cursor.execute('SELECT 1 FROM vagas_enviadas WHERE link = ? AND data_publicacao = ?', (link, data))
+                if cursor.fetchone():
+                    vagas_velhas += 1
+                    if vagas_velhas >= 20: break 
+                else:
+                    vagas_velhas = 0 
+                    cursor.execute('INSERT INTO vagas_enviadas VALUES (?, ?, ?)', (link, data, titulo))
+                    conn.commit()
+                    
+                    if vaga_nos_interessa(titulo):
+                        enviar_alerta_telegram(titulo, link, data, tags)
+                        time.sleep(3)
+                        
+        except Exception as e:
+            print(f"⚠️ Erro ou Timeout na página {pagina_atual}. Pulando...")
             
         pagina_atual += 1
-        if pagina_atual >500: 
-            break
 
     driver.quit()
     conn.close()
+    print("Varredura finalizada!")
 
 if __name__ == '__main__':
     buscar_vagas_refinadas()
