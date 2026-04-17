@@ -3,7 +3,7 @@
 Uma ferramenta automatizada de Web Scraping e inteligência de dados desenvolvida em Python. Este projeto extrai, filtra e notifica oportunidades de emprego em tempo real, substituindo a busca manual diária por um fluxo contínuo de dados. Os alertas são enviados diretamente para um grupo no Telegram com base em palavras-chave pré-configuradas.
 
 ## 📸 Demonstração
-<img width="913" height="273" alt="image (10)" src="https://github.com/user-attachments/assets/1fd32d21-53b9-4760-bddd-f42b32d2ecb4" />
+<img width="838" height="355" alt="image (11)" src="https://github.com/user-attachments/assets/0ec07bf3-602e-44a6-a0aa-5229b46f87ac" />
 
 ## ⚙️ Arquitetura e Funcionalidades
 
